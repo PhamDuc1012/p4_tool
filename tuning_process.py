@@ -338,72 +338,66 @@ def update_properties_block_preserve_format(lines, new_properties, start_header,
     # Create a copy of new_properties to track what we've processed
     remaining_properties = new_properties.copy()
     
-    # Track PRODUCT_PROPERTY_OVERRIDES blocks and their properties
-    current_override_start = None
-    current_override_properties = []
-    last_property_line_idx = 1  # Start after header
+    # Find PRODUCT_PROPERTY_OVERRIDES block
+    override_start = None
+    override_properties = {}
+    non_override_properties = {}
     
-    # First pass: identify all PRODUCT_PROPERTY_OVERRIDES blocks and their properties
-    override_blocks = []
-    i = 1
-    while i < len(original_lines):
-        line = original_lines[i]
+    # First pass: identify structure and extract all properties
+    for line_idx in range(1, len(original_lines)):
+        line = original_lines[line_idx]
         stripped_line = line.strip()
         
-        if "PRODUCT_PROPERTY_OVERRIDES" in stripped_line and "+=" in stripped_line:
-            # Start of new override block
-            block_start = i
-            block_properties = []
-            block_lines = [i]  # Store line indices
-            i += 1
-            
-            # Collect all properties in this block
-            while i < len(original_lines):
-                prop_line = original_lines[i]
-                prop_stripped = prop_line.strip()
-                
-                if not prop_stripped or prop_stripped.startswith("#"):
-                    block_lines.append(i)
-                    i += 1
-                    continue
-                
-                if "=" in prop_stripped:
-                    # Extract property name
-                    if prop_stripped.endswith("\\"):
-                        prop_content = prop_stripped[:-1].strip()
-                    else:
-                        prop_content = prop_stripped
-                    
-                    if "=" in prop_content:
-                        key = prop_content.split("=", 1)[0].strip()
-                        block_properties.append(key)
-                    
-                    block_lines.append(i)
-                    
-                    # If line doesn't end with backslash, this is end of block
-                    if not prop_stripped.endswith("\\"):
-                        i += 1
-                        break
-                    i += 1
-                else:
-                    # Non-property line, end of block
-                    break
-            
-            override_blocks.append({
-                'start': block_start,
-                'properties': block_properties,
-                'lines': block_lines
-            })
-        else:
-            i += 1
-    
-    # Second pass: rebuild the block with updates
-    processed_lines = set()
-    
-    for line_idx in range(1, len(original_lines)):  # Skip header
-        if line_idx in processed_lines:
+        # Skip comments and empty lines
+        if not stripped_line or stripped_line.startswith("#"):
             continue
             
+        # Find PRODUCT_PROPERTY_OVERRIDES line
+        if "PRODUCT_PROPERTY_OVERRIDES" in stripped_line and "+=" in stripped_line:
+            override_start = line_idx
+            continue
+            
+        # Extract properties
+        if "=" in stripped_line and not "PRODUCT_PROPERTY_OVERRIDES" in stripped_line:
+            # Clean the line - remove backslash and whitespace
+            prop_content = stripped_line.rstrip(" \\").strip()
+            if "=" in prop_content:
+                key, value = prop_content.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                
+                if override_start is not None:
+                    # This is inside PRODUCT_PROPERTY_OVERRIDES block
+                    override_properties[key] = value
+                else:
+                    # This is a regular property
+                    non_override_properties[key] = value
+    
+    # Update properties with new values - ONLY keep properties that exist in new_properties
+    # This ensures deletion works correctly
+    updated_override_properties = {}
+    updated_non_override_properties = {}
+    
+    # Process properties that should be kept/updated
+    for key, value in new_properties.items():
+        if key in override_properties:
+            # This property belongs to override block
+            updated_override_properties[key] = value
+        elif key in non_override_properties:
+            # This property belongs to non-override section
+            updated_non_override_properties[key] = value
+        else:
+            # New property - add to override block by default
+            updated_override_properties[key] = value
+    
+    override_properties = updated_override_properties
+    non_override_properties = updated_non_override_properties
+    remaining_properties = {}  # All properties are now processed
+    
+    # Second pass: rebuild the block
+    processed_override = False
+    
+    for line_idx in range(1, len(original_lines)):
         line = original_lines[line_idx]
         stripped_line = line.strip()
         
@@ -412,119 +406,105 @@ def update_properties_block_preserve_format(lines, new_properties, start_header,
             new_block.append(line)
             continue
         
-        # Handle PRODUCT_PROPERTY_OVERRIDES blocks
-        current_block = None
-        for block in override_blocks:
-            if line_idx == block['start']:
-                current_block = block
-                break
-        
-        if current_block:
-            # Process entire PRODUCT_PROPERTY_OVERRIDES block
-            new_block.append(original_lines[current_block['start']])  # Add PRODUCT_PROPERTY_OVERRIDES line
-            processed_lines.add(current_block['start'])
-            
-            # Get indentation from existing properties
-            default_indent = "    "
-            for idx in current_block['lines'][1:]:  # Skip PRODUCT_PROPERTY_OVERRIDES line
-                if idx < len(original_lines):
-                    prop_line = original_lines[idx]
-                    if "=" in prop_line.strip() and not prop_line.strip().startswith("#"):
-                        default_indent = prop_line[:len(prop_line) - len(prop_line.lstrip())]
-                        break
-            
-            # Collect all properties for this block (existing + new)
-            block_props = {}
-            
-            # Add existing properties
-            for idx in current_block['lines'][1:]:  # Skip PRODUCT_PROPERTY_OVERRIDES line
-                if idx < len(original_lines):
-                    prop_line = original_lines[idx]
-                    prop_stripped = prop_line.strip()
-                    
-                    if not prop_stripped or prop_stripped.startswith("#"):
-                        continue
-                        
-                    if "=" in prop_stripped:
-                        prop_content = prop_stripped[:-1].strip() if prop_stripped.endswith("\\") else prop_stripped
-                        if "=" in prop_content:
-                            key, value = prop_content.split("=", 1)
-                            key = key.strip()
-                            
-                            # Use new value if exists, otherwise keep original
-                            if key in remaining_properties:
-                                block_props[key] = remaining_properties[key]
-                                del remaining_properties[key]
-                            else:
-                                block_props[key] = value.strip()
-            
-            # Add any remaining new properties to this block
-            for key, value in list(remaining_properties.items()):
-                block_props[key] = value
-                del remaining_properties[key]
-            
-            # Write all properties in this block
-            prop_items = list(block_props.items())
-            for idx, (key, value) in enumerate(prop_items):
-                if idx == len(prop_items) - 1:  # Last property - no backslash
-                    new_block.append(f"{default_indent}{key}={value}\n")
-                else:  # Not last property - add backslash
-                    new_block.append(f"{default_indent}{key}={value} \\\n")
-            
-            # Mark all lines in this block as processed
-            for idx in current_block['lines']:
-                processed_lines.add(idx)
-            
-            last_property_line_idx = len(new_block)
-            
-        # Handle regular property lines (not in PRODUCT_PROPERTY_OVERRIDES block)
-        elif "=" in stripped_line and not "PRODUCT_PROPERTY_OVERRIDES" in stripped_line:
-            key, old_value = stripped_line.split("=", 1)
-            key = key.strip()
-            
-            # Preserve original indentation
-            indent = len(line) - len(line.lstrip())
-            indent_str = line[:indent]
-            
-            # Get trailing comment if exists
-            trailing_comment = ""
-            if "#" in old_value:
-                value_part, comment_part = old_value.split("#", 1)
-                trailing_comment = " #" + comment_part.rstrip()
-            
-            # Update with new value if exists, otherwise keep original
-            if key in remaining_properties:
-                new_value = remaining_properties[key]
-                new_line = f"{indent_str}{key}={new_value}{trailing_comment}\n"
-                new_block.append(new_line)
-                # Remove this key so we don't add it again
-                del remaining_properties[key]
-            else:
-                # Keep original line unchanged
-                new_block.append(line)
-            
-            last_property_line_idx = len(new_block)
-            
-        else:
-            # Keep other lines unchanged
+        # Handle PRODUCT_PROPERTY_OVERRIDES line
+        if "PRODUCT_PROPERTY_OVERRIDES" in stripped_line and "+=" in stripped_line and not processed_override:
+            # Add the PRODUCT_PROPERTY_OVERRIDES line
             new_block.append(line)
-    
-    # Add any remaining new properties as regular properties (if no PRODUCT_PROPERTY_OVERRIDES blocks)
-    if remaining_properties:
-        # Find appropriate indentation from existing properties
-        default_indent = "    "  # Default 4 spaces for properties
-        for line in original_lines:
-            if "=" in line and not line.strip().startswith("#") and not "PRODUCT_PROPERTY_OVERRIDES" in line:
-                default_indent = line[:len(line) - len(line.lstrip())]
-                break
+            
+            # Add all properties in override block with proper formatting
+            if override_properties:
+                # Get indentation from original properties
+                default_indent = "    "  # Default 4 spaces
+                for check_idx in range(line_idx + 1, len(original_lines)):
+                    check_line = original_lines[check_idx]
+                    if "=" in check_line.strip() and not check_line.strip().startswith("#"):
+                        default_indent = check_line[:len(check_line) - len(check_line.lstrip())]
+                        break
+                
+                # Build list of properties maintaining some original order if possible
+                prop_items = []
+                
+                # Add properties in a logical order: existing first, then new ones
+                original_keys = []
+                for check_idx in range(line_idx + 1, len(original_lines)):
+                    check_line = original_lines[check_idx]
+                    check_stripped = check_line.strip()
+                    if "=" in check_stripped and not check_stripped.startswith("#") and not "PRODUCT_PROPERTY_OVERRIDES" in check_stripped:
+                        prop_content = check_stripped.rstrip(" \\").strip()
+                        if "=" in prop_content:
+                            key = prop_content.split("=", 1)[0].strip()
+                            if key in override_properties:
+                                original_keys.append(key)
+                
+                # Add properties in specific order for better formatting
+                # First, add original properties in their original order
+                for key in original_keys:
+                    if key in override_properties and key != "test":  # Skip test for now
+                        prop_items.append((key, override_properties[key]))
+                        del override_properties[key]
+                
+                # Add new non-test properties 
+                new_props = []
+                test_props = []
+                for key, value in override_properties.items():
+                    if key == "test":
+                        test_props.append((key, value))
+                    else:
+                        new_props.append((key, value))
+                
+                # Add new non-test properties first
+                prop_items.extend(new_props)
+                
+                # Add test properties near the end (before the last property if possible)
+                if test_props and prop_items:
+                    # Insert test properties before the last property
+                    last_prop = prop_items.pop() if prop_items else None
+                    prop_items.extend(test_props)
+                    if last_prop:
+                        prop_items.append(last_prop)
+                elif test_props:
+                    # If no other properties, just add test properties
+                    prop_items.extend(test_props)
+                
+                # Write properties with proper backslash formatting
+                for idx, (key, value) in enumerate(prop_items):
+                    if idx == len(prop_items) - 1:  # Last property - no backslash
+                        new_block.append(f"{default_indent}{key}={value}\n")
+                    else:  # Not last property - add backslash
+                        new_block.append(f"{default_indent}{key}={value} \\\n")
+            
+            processed_override = True
+            continue
         
-        # Insert new properties at the correct position (after last property)
-        new_props_lines = []
-        for key, value in remaining_properties.items():
-            new_props_lines.append(f"{default_indent}{key}={value}\n")
+        # Skip original property lines inside PRODUCT_PROPERTY_OVERRIDES (we already processed them)
+        if override_start is not None and line_idx > override_start and ("=" in stripped_line and not "PRODUCT_PROPERTY_OVERRIDES" in stripped_line):
+            continue
         
-        # Insert new properties after the last property line
-        new_block = new_block[:last_property_line_idx] + new_props_lines + new_block[last_property_line_idx:]
+        # Handle regular property lines (not in PRODUCT_PROPERTY_OVERRIDES)
+        if "=" in stripped_line and not "PRODUCT_PROPERTY_OVERRIDES" in stripped_line and override_start is None:
+            prop_content = stripped_line.rstrip(" \\").strip()
+            if "=" in prop_content:
+                key = prop_content.split("=", 1)[0].strip()
+                
+                if key in non_override_properties:
+                    # Preserve original indentation
+                    indent = len(line) - len(line.lstrip())
+                    indent_str = line[:indent]
+                    
+                    # Get trailing comment if exists
+                    trailing_comment = ""
+                    if "#" in line:
+                        line_parts = line.split("#", 1)
+                        if len(line_parts) > 1:
+                            trailing_comment = " #" + line_parts[1].rstrip()
+                    
+                    new_value = non_override_properties[key]
+                    new_line = f"{indent_str}{key}={new_value}{trailing_comment}\n"
+                    new_block.append(new_line)
+                    continue
+        
+        # Keep other lines unchanged
+        new_block.append(line)
     
     # Replace the block
     return lines[:start] + new_block + lines[end:]
